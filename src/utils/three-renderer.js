@@ -1,16 +1,16 @@
-// WebGL Renderer for main thread (when OffscreenCanvas is not available)
-// This is the same renderer logic but works directly on the main canvas
+// Three.js-based Video Renderer
+// Optimized for video transitions with hardware acceleration
 
-export class WebGLRendererMain {
+import * as THREE from 'three';
+
+export class ThreeRenderer {
     constructor(canvas) {
         this.canvas = canvas;
-        this.gl = canvas.getContext('webgl2', {
-            alpha: false,
-            antialias: false,
-            preserveDrawingBuffer: false,
-            powerPreference: 'high-performance',
-            failIfMajorPerformanceCaveat: false
-        }) || canvas.getContext('webgl', {
+        this.contextLost = false;
+
+        // Initialize Three.js renderer
+        this.renderer = new THREE.WebGLRenderer({
+            canvas: canvas,
             alpha: false,
             antialias: false,
             preserveDrawingBuffer: false,
@@ -18,149 +18,85 @@ export class WebGLRendererMain {
             failIfMajorPerformanceCaveat: false
         });
 
-        if (!this.gl) {
-            throw new Error('WebGL not supported');
-        }
-
-        // Handle WebGL context loss (common on mobile)
-        this.contextLost = false;
+        // Set up scene
+        this.scene = new THREE.Scene();
+        
+        // Orthographic camera for 2D rendering
+        this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        
+        // Plane geometry for video rendering
+        this.geometry = new THREE.PlaneGeometry(2, 2);
+        
+        // Video textures
+        this.texture1 = null;
+        this.texture2 = null;
+        
+        // Current material
+        this.material = null;
+        this.mesh = null;
+        
+        // Handle context loss
         canvas.addEventListener('webglcontextlost', (e) => {
-            console.warn('WebGL context lost');
+            console.warn('WebGL context lost (Three.js)');
             e.preventDefault();
             this.contextLost = true;
         }, false);
 
         canvas.addEventListener('webglcontextrestored', () => {
-            console.log('WebGL context restored');
             this.contextLost = false;
-            try {
-                this.setupWebGL();
-                this.createTextures();
-                this.compileShaders();
-            } catch (error) {
-                console.error('Failed to restore WebGL context:', error);
-            }
+            this.initRenderer();
         }, false);
 
-        this.setupWebGL();
-        this.createTextures();
-        this.compileShaders();
+        this.initRenderer();
     }
 
-    setupWebGL() {
-        const gl = this.gl;
-
-        // Create vertex buffer
-        const positions = new Float32Array([
-            -1, -1,
-             1, -1,
-            -1,  1,
-             1,  1,
-        ]);
-
-        this.positionBuffer = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-
-        // Create texture coordinates
-        const texCoords = new Float32Array([
-            0, 1,
-            1, 1,
-            0, 0,
-            1, 0,
-        ]);
-
-        this.texCoordBuffer = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.texCoordBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, texCoords, gl.STATIC_DRAW);
+    initRenderer() {
+        this.renderer.setSize(this.canvas.width, this.canvas.height, false);
+        this.renderer.setClearColor(0x000000, 1);
     }
 
-    createTextures() {
-        const gl = this.gl;
-
-        this.texture1 = gl.createTexture();
-        this.texture2 = gl.createTexture();
-
-        for (const texture of [this.texture1, this.texture2]) {
-            gl.bindTexture(gl.TEXTURE_2D, texture);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        }
+    createVideoTexture(video) {
+        if (!video) return null;
+        
+        const texture = new THREE.VideoTexture(video);
+        texture.minFilter = THREE.LinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+        texture.format = THREE.RGBAFormat;
+        texture.generateMipmaps = false;
+        
+        return texture;
     }
 
-    compileShaders() {
-        const gl = this.gl;
-
-        // Vertex shader (same for all transitions)
-        const vertexShaderSource = `
-            attribute vec2 a_position;
-            attribute vec2 a_texCoord;
-            varying vec2 v_texCoord;
-
-            void main() {
-                gl_Position = vec4(a_position, 0.0, 1.0);
-                v_texCoord = a_texCoord;
+    updateTextures(video1, video2) {
+        // Update or create texture1
+        if (video1) {
+            if (!this.texture1 || this.texture1.image !== video1) {
+                if (this.texture1) this.texture1.dispose();
+                this.texture1 = this.createVideoTexture(video1);
+                // Force immediate texture update
+                this.texture1.needsUpdate = true;
+            } else {
+                // Also set needsUpdate for existing texture to ensure fresh frame
+                this.texture1.needsUpdate = true;
             }
-        `;
-
-        this.shaderPrograms = {};
-
-        // Import shader sources from a shared module
-        const shaders = this.getShaderSources();
-
-        for (const [name, fragmentSource] of Object.entries(shaders)) {
-            this.shaderPrograms[name] = this.createShaderProgram(vertexShaderSource, fragmentSource);
         }
-    }
-
-    createShaderProgram(vertexSource, fragmentSource) {
-        const gl = this.gl;
-
-        const vertexShader = this.compileShader(gl.VERTEX_SHADER, vertexSource);
-        const fragmentShader = this.compileShader(gl.FRAGMENT_SHADER, fragmentSource);
-
-        const program = gl.createProgram();
-        gl.attachShader(program, vertexShader);
-        gl.attachShader(program, fragmentShader);
-        gl.linkProgram(program);
-
-        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-            console.error('Shader program link error:', gl.getProgramInfoLog(program));
-            return null;
-        }
-
-        return {
-            program: program,
-            locations: {
-                position: gl.getAttribLocation(program, 'a_position'),
-                texCoord: gl.getAttribLocation(program, 'a_texCoord'),
-                texture1: gl.getUniformLocation(program, 'u_texture1'),
-                texture2: gl.getUniformLocation(program, 'u_texture2'),
-                progress: gl.getUniformLocation(program, 'u_progress'),
-                resolution: gl.getUniformLocation(program, 'u_resolution'),
+    
+        // Update or create texture2
+        if (video2) {
+            if (!this.texture2 || this.texture2.image !== video2) {
+                if (this.texture2) this.texture2.dispose();
+                this.texture2 = this.createVideoTexture(video2);
+                // Force immediate texture update
+                this.texture2.needsUpdate = true;
+            } else {
+                // Also set needsUpdate for existing texture to ensure fresh frame
+                this.texture2.needsUpdate = true;
             }
-        };
-    }
-
-    compileShader(type, source) {
-        const gl = this.gl;
-        const shader = gl.createShader(type);
-        gl.shaderSource(shader, source);
-        gl.compileShader(shader);
-
-        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-            console.error('Shader compile error:', gl.getShaderInfoLog(shader));
-            gl.deleteShader(shader);
-            return null;
         }
-
-        return shader;
     }
 
-    getShaderSources() {
-        return {
+    getShader(transitionType) {
+        const shaders = {
             'fade': this.getFadeShader(),
             'dissolve': this.getDissolveShader(),
             'wipe-left': this.getWipeShader('left'),
@@ -189,9 +125,111 @@ export class WebGLRendererMain {
             'radial-blur': this.getRadialBlurShader(),
             'crosshatch': this.getCrosshatchShader()
         };
+
+        return shaders[transitionType] || shaders['fade'];
     }
 
-    // Shader implementations (same as worker)
+    createMaterial(transitionType, progress = 0) {
+        const shader = this.getShader(transitionType);
+        
+        return new THREE.ShaderMaterial({
+            uniforms: {
+                u_texture1: { value: this.texture1 },
+                u_texture2: { value: this.texture2 },
+                u_progress: { value: progress },
+                u_resolution: { value: new THREE.Vector2(this.canvas.width, this.canvas.height) }
+            },
+            // vertexShader: `
+            //     attribute vec2 a_position;
+            //     attribute vec2 a_texCoord;
+            //     varying vec2 v_texCoord;
+
+            //     void main() {
+            //         gl_Position = vec4(a_position, 0.0, 1.0);
+            //         v_texCoord = a_texCoord;
+            //     }
+            // `,
+            vertexShader: `
+                varying vec2 v_texCoord;
+                
+                void main() {
+                    v_texCoord = uv;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            // vertexShader: `
+            //     attribute vec2 a_position;
+            //     attribute vec2 a_texCoord;
+            //     varying vec2 v_texCoord;
+
+            //     void main() {
+            //         gl_Position = vec4(a_position, 0.0, 1.0);
+            //         v_texCoord = a_texCoord;
+            //     }
+            // `,
+            fragmentShader: shader,
+            transparent: false,
+            depthTest: false,
+            depthWrite: false
+        });
+    }
+
+    render(video1, video2, progress, transitionType) {
+        if (this.contextLost) {
+            console.warn('Context lost, skipping render');
+            return;
+        }
+
+        // Update textures
+        this.updateTextures(video1, video2);
+
+        // Create or update material
+        if (!this.material || this.currentTransition !== transitionType) {
+            if (this.material) this.material.dispose();
+            this.material = this.createMaterial(transitionType, progress);
+            this.currentTransition = transitionType;
+
+            // Create or update mesh
+            if (this.mesh) {
+                this.scene.remove(this.mesh);
+            }
+            this.mesh = new THREE.Mesh(this.geometry, this.material);
+            this.scene.add(this.mesh);
+        } else {
+            // Update uniforms
+            this.material.uniforms.u_texture1.value = this.texture1;
+            this.material.uniforms.u_texture2.value = this.texture2;
+            this.material.uniforms.u_progress.value = progress;
+            this.material.uniforms.u_resolution.value.set(this.canvas.width, this.canvas.height);
+        }
+
+        // Render scene
+        this.renderer.render(this.scene, this.camera);
+    }
+
+    renderSingleFrame(video) {
+        this.render(video, null, 0, 'fade');
+    }
+
+    destroy() {
+        // Dispose textures
+        if (this.texture1) this.texture1.dispose();
+        if (this.texture2) this.texture2.dispose();
+
+        // Dispose material
+        if (this.material) this.material.dispose();
+
+        // Dispose geometry
+        if (this.geometry) this.geometry.dispose();
+
+        // Dispose renderer
+        if (this.renderer) {
+            this.renderer.dispose();
+        }
+    }
+
+    // Shader implementations (same as before, optimized for Three.js)
+    
     getFadeShader() {
         return `
             precision mediump float;
@@ -221,28 +259,25 @@ export class WebGLRendererMain {
             }
 
             void main() {
-                vec4 color1 = texture2D(u_texture1, v_texCoord); // Current video
-                vec4 color2 = texture2D(u_texture2, v_texCoord); // Next video
+                vec4 color1 = texture2D(u_texture1, v_texCoord);
+                vec4 color2 = texture2D(u_texture2, v_texCoord);
 
                 float noise = random(v_texCoord);
                 float threshold = u_progress * 1.2 - 0.1;
-
-                // Calculate alpha: starts at 1 (show color1), ends at 0 (show color2)
                 float alpha = smoothstep(threshold, threshold + 0.1, noise);
 
-                // Mix from color2 to color1 based on alpha (so we go from color1 to color2 as alpha decreases)
                 gl_FragColor = mix(color2, color1, alpha);
             }
         `;
     }
 
     getWipeShader(direction) {
-        const condition = {
+        const conditions = {
             'left': 'v_texCoord.x < u_progress',
             'right': 'v_texCoord.x > 1.0 - u_progress',
             'up': 'v_texCoord.y < u_progress',
             'down': 'v_texCoord.y > 1.0 - u_progress'
-        }[direction];
+        };
 
         return `
             precision mediump float;
@@ -254,7 +289,7 @@ export class WebGLRendererMain {
             void main() {
                 vec4 color1 = texture2D(u_texture1, v_texCoord);
                 vec4 color2 = texture2D(u_texture2, v_texCoord);
-                gl_FragColor = ${condition} ? color2 : color1;
+                gl_FragColor = ${conditions[direction]} ? color2 : color1;
             }
         `;
     }
@@ -301,12 +336,12 @@ export class WebGLRendererMain {
     }
 
     getSlideShader(direction) {
-        const offset = {
+        const offsets = {
             'left': 'vec2(1.0 - u_progress, 0.0)',
             'right': 'vec2(u_progress - 1.0, 0.0)',
             'up': 'vec2(0.0, 1.0 - u_progress)',
             'down': 'vec2(0.0, u_progress - 1.0)'
-        }[direction];
+        };
 
         return `
             precision mediump float;
@@ -316,7 +351,7 @@ export class WebGLRendererMain {
             varying vec2 v_texCoord;
 
             void main() {
-                vec2 offset = ${offset};
+                vec2 offset = ${offsets[direction]};
                 vec2 texCoord2 = v_texCoord + offset;
 
                 if (texCoord2.x < 0.0 || texCoord2.x > 1.0 || texCoord2.y < 0.0 || texCoord2.y > 1.0) {
@@ -330,7 +365,6 @@ export class WebGLRendererMain {
 
     getZoomShader(type) {
         if (type === 'out') {
-            // Zoom out: current video (texture1) zooms out to reveal next video (texture2) underneath
             return `
                 precision mediump float;
                 uniform sampler2D u_texture1;
@@ -339,24 +373,22 @@ export class WebGLRendererMain {
                 varying vec2 v_texCoord;
 
                 void main() {
-                    vec4 color2 = texture2D(u_texture2, v_texCoord); // Next video (background)
-                    float scale = 1.0 - u_progress; // Zoom out current video
+                    vec4 color2 = texture2D(u_texture2, v_texCoord);
+                    float scale = 1.0 - u_progress;
                     vec2 center = vec2(0.5, 0.5);
                     vec2 scaledCoord = center + (v_texCoord - center) / max(scale, 0.001);
 
                     vec4 color1;
                     if (scaledCoord.x < 0.0 || scaledCoord.x > 1.0 || scaledCoord.y < 0.0 || scaledCoord.y > 1.0) {
-                        color1 = vec4(0.0, 0.0, 0.0, 0.0); // Transparent outside bounds
+                        color1 = vec4(0.0, 0.0, 0.0, 0.0);
                     } else {
-                        color1 = texture2D(u_texture1, scaledCoord); // Current video (zooming)
+                        color1 = texture2D(u_texture1, scaledCoord);
                     }
 
-                    // Mix: as progress increases, fade out the zooming video to reveal background
                     gl_FragColor = mix(color1, color2, u_progress);
                 }
             `;
         } else {
-            // Zoom in: next video (texture2) zooms in over current video (texture1)
             return `
                 precision mediump float;
                 uniform sampler2D u_texture1;
@@ -365,8 +397,8 @@ export class WebGLRendererMain {
                 varying vec2 v_texCoord;
 
                 void main() {
-                    vec4 color1 = texture2D(u_texture1, v_texCoord); // Current video (background)
-                    float scale = u_progress; // Zoom in next video
+                    vec4 color1 = texture2D(u_texture1, v_texCoord);
+                    float scale = u_progress;
                     vec2 center = vec2(0.5, 0.5);
                     vec2 scaledCoord = center + (v_texCoord - center) / max(scale, 0.001);
 
@@ -374,7 +406,7 @@ export class WebGLRendererMain {
                     if (scaledCoord.x < 0.0 || scaledCoord.x > 1.0 || scaledCoord.y < 0.0 || scaledCoord.y > 1.0) {
                         color2 = vec4(0.0);
                     } else {
-                        color2 = texture2D(u_texture2, scaledCoord); // Next video (zooming)
+                        color2 = texture2D(u_texture2, scaledCoord);
                     }
 
                     gl_FragColor = mix(color1, color2, u_progress);
@@ -392,15 +424,13 @@ export class WebGLRendererMain {
             varying vec2 v_texCoord;
 
             void main() {
-                vec4 color2 = texture2D(u_texture2, v_texCoord); // Next video (background)
+                vec4 color2 = texture2D(u_texture2, v_texCoord);
 
-                // Rotate and scale down the current video
-                float angle = u_progress * 3.14159 / 2.0; // Rotate 90 degrees
-                float scale = 1.0 - u_progress * 0.5; // Scale down to 50%
+                float angle = u_progress * 3.14159 / 2.0;
+                float scale = 1.0 - u_progress * 0.5;
                 vec2 center = vec2(0.5, 0.5);
                 vec2 pos = v_texCoord - center;
 
-                // Apply rotation
                 float s = sin(angle);
                 float c = cos(angle);
                 vec2 rotated = vec2(
@@ -410,12 +440,11 @@ export class WebGLRendererMain {
 
                 vec4 color1;
                 if (rotated.x < 0.0 || rotated.x > 1.0 || rotated.y < 0.0 || rotated.y > 1.0) {
-                    color1 = vec4(0.0, 0.0, 0.0, 0.0); // Transparent outside bounds
+                    color1 = vec4(0.0, 0.0, 0.0, 0.0);
                 } else {
-                    color1 = texture2D(u_texture1, rotated); // Current video (rotating/scaling)
+                    color1 = texture2D(u_texture1, rotated);
                 }
 
-                // Mix: as progress increases, current video fades out revealing next video
                 gl_FragColor = mix(color1, color2, u_progress);
             }
         `;
@@ -507,6 +536,7 @@ export class WebGLRendererMain {
         `;
     }
 
+
     getRippleShader() {
         return `
             precision mediump float;
@@ -544,15 +574,11 @@ export class WebGLRendererMain {
                 float dist = length(pos);
                 float angle = atan(pos.y, pos.x);
 
-                // Apply swirl to texture1 (current video swirls away)
-                // Swirl increases as progress increases
                 float swirl1 = u_progress * 6.28318 * (1.0 - dist);
                 float angle1 = angle + swirl1;
                 vec2 swirlCoord1 = center + dist * vec2(cos(angle1), sin(angle1));
                 vec4 color1 = texture2D(u_texture1, swirlCoord1);
 
-                // Apply reverse swirl to texture2 (next video unswirls from swirled state)
-                // Swirl decreases as progress increases (starts swirled, ends normal)
                 float swirl2 = (1.0 - u_progress) * 6.28318 * (1.0 - dist);
                 float angle2 = angle + swirl2;
                 vec2 swirlCoord2 = center + dist * vec2(cos(angle2), sin(angle2));
@@ -647,24 +673,19 @@ export class WebGLRendererMain {
             varying vec2 v_texCoord;
 
             void main() {
-                // Curl from right to left (curling away the current page)
                 float curlAmount = 1.0 - u_progress * 1.2;
                 vec2 pos = v_texCoord;
 
-                // Create curl transition zone based on x position
                 float curl = smoothstep(curlAmount - 0.3, curlAmount + 0.1, pos.x);
 
-                // Add shadow effect on the curling edge
                 float shadow = smoothstep(curlAmount, curlAmount + 0.2, pos.x) *
                               (1.0 - smoothstep(curlAmount + 0.2, curlAmount + 0.4, pos.x));
 
-                vec4 color1 = texture2D(u_texture1, pos); // Current page being curled away
-                vec4 color2 = texture2D(u_texture2, pos); // Next page underneath
+                vec4 color1 = texture2D(u_texture1, pos);
+                vec4 color2 = texture2D(u_texture2, pos);
 
-                // Apply shadow to the page being curled
                 color1.rgb *= 1.0 - shadow * 0.6;
 
-                // Mix: show texture2 (underneath) where curled away, texture1 where still flat
                 gl_FragColor = mix(color1, color2, curl);
             }
         `;
@@ -780,114 +801,5 @@ export class WebGLRendererMain {
             }
         `;
     }
-
-    render(video1, video2, progress, transitionType) {
-        if (this.contextLost) {
-            console.warn('WebGL context lost, skipping render');
-            return;
-        }
-
-        const gl = this.gl;
-        const program = this.shaderPrograms[transitionType];
-
-        if (!program) {
-            console.warn('Shader not found:', transitionType);
-            return;
-        }
-
-        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-        gl.clearColor(0, 0, 0, 1);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-
-        gl.useProgram(program.program);
-
-        // Bind textures
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, this.texture1);
-        if (video1 && video1.readyState >= 2) {
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video1);
-        }
-
-        gl.activeTexture(gl.TEXTURE1);
-        gl.bindTexture(gl.TEXTURE_2D, this.texture2);
-        if (video2 && video2.readyState >= 2) {
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video2);
-        }
-
-        // Set uniforms
-        gl.uniform1i(program.locations.texture1, 0);
-        gl.uniform1i(program.locations.texture2, 1);
-        gl.uniform1f(program.locations.progress, progress);
-        gl.uniform2f(program.locations.resolution, gl.canvas.width, gl.canvas.height);
-
-        // Set attributes
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
-        gl.enableVertexAttribArray(program.locations.position);
-        gl.vertexAttribPointer(program.locations.position, 2, gl.FLOAT, false, 0, 0);
-
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.texCoordBuffer);
-        gl.enableVertexAttribArray(program.locations.texCoord);
-        gl.vertexAttribPointer(program.locations.texCoord, 2, gl.FLOAT, false, 0, 0);
-
-        // Draw
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    }
-
-    renderSingleFrame(video) {
-        if (this.contextLost) {
-            console.warn('WebGL context lost, skipping render');
-            return;
-        }
-
-        const gl = this.gl;
-
-        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-        gl.clearColor(0, 0, 0, 1);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-
-        // Use simple fade shader with progress 0 for single frame
-        const program = this.shaderPrograms['fade'];
-        if (!program) return;
-
-        gl.useProgram(program.program);
-
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, this.texture1);
-        if (video && video.readyState >= 2) {
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
-        }
-
-        gl.uniform1i(program.locations.texture1, 0);
-        gl.uniform1i(program.locations.texture2, 0);
-        gl.uniform1f(program.locations.progress, 0);
-
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
-        gl.enableVertexAttribArray(program.locations.position);
-        gl.vertexAttribPointer(program.locations.position, 2, gl.FLOAT, false, 0, 0);
-
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.texCoordBuffer);
-        gl.enableVertexAttribArray(program.locations.texCoord);
-        gl.vertexAttribPointer(program.locations.texCoord, 2, gl.FLOAT, false, 0, 0);
-
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    }
-
-    destroy() {
-        const gl = this.gl;
-
-        // Clean up textures
-        if (this.texture1) gl.deleteTexture(this.texture1);
-        if (this.texture2) gl.deleteTexture(this.texture2);
-
-        // Clean up buffers
-        if (this.positionBuffer) gl.deleteBuffer(this.positionBuffer);
-        if (this.texCoordBuffer) gl.deleteBuffer(this.texCoordBuffer);
-
-        // Clean up shader programs
-        for (const program of Object.values(this.shaderPrograms)) {
-            if (program && program.program) {
-                gl.deleteProgram(program.program);
-            }
-        }
-    }
 }
+

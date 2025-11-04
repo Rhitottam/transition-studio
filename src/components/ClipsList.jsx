@@ -49,11 +49,13 @@ function ClipItem({ clip, index, isFirst, isLast, onMoveUp, onMoveDown, onRemove
         if (canvasRef.current && clip.video.readyState >= 2) {
             const canvas = canvasRef.current;
             const ctx = canvas.getContext('2d');
-
             // Wait a bit for video to be ready
             setTimeout(() => {
                 try {
-                    ctx.drawImage(clip.video, 0, 0, 60, 40);
+                    const aspectRatio = clip.video.videoWidth / clip.video.videoHeight;
+                    const thumbnailWidth = aspectRatio > 1 ? 60 : 60 * aspectRatio;
+                    const thumbnailHeight = aspectRatio > 1 ? thumbnailWidth / aspectRatio : 60;
+                    ctx.drawImage(clip.video, 30 - thumbnailWidth / 2, 30 - thumbnailHeight / 2, thumbnailWidth, thumbnailHeight);
                 } catch (e) {
                     console.error('Error drawing thumbnail:', e);
                 }
@@ -63,7 +65,7 @@ function ClipItem({ clip, index, isFirst, isLast, onMoveUp, onMoveDown, onRemove
 
     return (
         <div className="clip-item">
-            <canvas ref={canvasRef} className="clip-thumbnail" width="60" height="40"></canvas>
+            <canvas ref={canvasRef} className="clip-thumbnail" width="60" height="60"></canvas>
             <div className="clip-info">
                 <div className="clip-name">{clip.name}</div>
                 <div className="clip-duration">{formatTime(clip.duration)}</div>

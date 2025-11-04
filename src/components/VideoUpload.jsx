@@ -70,7 +70,6 @@ function VideoUpload({ onFilesSelected }) {
             onDrop={handleDrop}
             onClick={handleClick}
         >
-            <div className="upload-icon">📹</div>
             <h3>Upload Video Files</h3>
             <p>Click to select or drag & drop multiple video files</p>
         </div>

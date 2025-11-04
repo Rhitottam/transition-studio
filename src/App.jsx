@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import VideoUpload from './components/VideoUpload';
-import VideoPreview from './components/VideoPreview';
-import ControlsPanel from './components/ControlsPanel';
-import ClipsList from './components/ClipsList';
-import Timeline from './components/Timeline';
-import PlaybackControls from './components/PlaybackControls';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import './App.css';
+import ClipsList from './components/ClipsList';
+import ControlsPanel from './components/ControlsPanel';
+import PlaybackControls from './components/PlaybackControls';
+import Timeline from './components/Timeline';
+import VideoPreview from './components/VideoPreview';
+import VideoUpload from './components/VideoUpload';
 
 function App() {
     const [clips, setClips] = useState([]);
@@ -19,6 +19,8 @@ function App() {
     const [transitionDuration, setTransitionDuration] = useState(1);
     const [transitionPosition, setTransitionPosition] = useState('between');
     const [fps, setFps] = useState(0);
+    const [isLoadingVideos, setIsLoadingVideos] = useState(false);
+    const [loadingProgress, setLoadingProgress] = useState({ current: 0, total: 0 });
 
     const animationFrameRef = useRef(null);
     const startTimeRef = useRef(0);
@@ -29,73 +31,123 @@ function App() {
     }, [clips, transitions]);
 
     const calculateTotalDuration = () => {
+        // New model: Total duration is simply the sum of all clip durations
+        // Transitions don't affect total duration, they just span the clip boundaries
         let total = 0;
-
-        // Start transition overlaps with first clip, no extra time added
-        const startTransition = transitions.find(t => t.position === 'start');
-
+        
         for (let i = 0; i < clips.length; i++) {
-            const clip = clips[i];
-            total += clip.duration;
-
-            // Between transitions overlap the end of current clip and start of next clip
-            // So we subtract the transition duration (overlap time)
-            if (i < clips.length - 1) {
-                const transition = transitions.find(t =>
-                    t.position === 'between' && t.afterClipIndex === i
-                );
-                if (transition) {
-                    // Subtract overlap duration (videos play simultaneously during transition)
-                    total -= Math.min(transition.duration, clip.duration, clips[i + 1].duration);
-                }
-            }
+            total += clips[i].duration;
         }
-
-        // End transition overlaps with last clip, no extra time added
-        const endTransition = transitions.find(t => t.position === 'end');
 
         setTotalDuration(total);
     };
 
     const addClips = useCallback(async (files) => {
+        setIsLoadingVideos(true);
+        setLoadingProgress({ current: 0, total: files.length });
         const newClips = [];
 
-        for (const file of files) {
-            const video = document.createElement('video');
-            video.preload = 'auto';
-            video.muted = true;
-            video.playsInline = true;
-            video.crossOrigin = 'anonymous';
+        try {
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                setLoadingProgress({ current: i, total: files.length });
 
-            const objectUrl = URL.createObjectURL(file);
-            video.src = objectUrl;
+                const video = document.createElement('video');
+                video.preload = 'auto'; // Critical: load entire video
+                video.muted = true;
+                video.playsInline = true; // Critical for iOS
+                video.crossOrigin = 'anonymous';
+                
+                // Mobile fix: Attach video to DOM (hidden) for better frame access
+                video.style.opacity = '0';
+                video.style.display = 'none';
+                video.style.pointerEvents = 'none';
+                document.body.appendChild(video);
 
-            await new Promise((resolve, reject) => {
-                video.addEventListener('loadedmetadata', () => {
-                    const clip = {
-                        id: Date.now() + Math.random(),
-                        video: video,
-                        name: file.name,
-                        duration: video.duration,
-                        startTime: 0,
-                        width: video.videoWidth,
-                        height: video.videoHeight,
-                        objectUrl: objectUrl
+                const objectUrl = URL.createObjectURL(file);
+                video.src = objectUrl;
+
+                // Wait for video to be fully loaded and buffered
+                await new Promise((resolve, reject) => {
+                    let resolved = false;
+                    const timeoutDuration = 60000; // 60 seconds for large videos
+
+                    const onCanPlayThrough = () => {
+                        if (resolved) return;
+                        
+                        // Video is fully buffered and can play through without stopping
+                        const clip = {
+                            id: Date.now() + Math.random(),
+                            video: video,
+                            name: file.name,
+                            duration: video.duration,
+                            startTime: 0,
+                            width: video.videoWidth,
+                            height: video.videoHeight,
+                            objectUrl: objectUrl,
+                            loaded: true
+                        };
+
+                        newClips.push(clip);
+                        resolved = true;
+                        resolve();
                     };
 
-                    newClips.push(clip);
-                    resolve();
+                    const onError = (e) => {
+                        if (resolved) return;
+                        resolved = true;
+                        console.error('Video load error:', e);
+                        reject(new Error(`Failed to load: ${file.name}`));
+                    };
+
+                    const onTimeout = () => {
+                        if (resolved) return;
+                        resolved = true;
+                        reject(new Error(`Timeout loading: ${file.name} - Video may be too large or slow network`));
+                    };
+
+                    // Listen for canplaythrough event - video is fully buffered
+                    video.addEventListener('canplay', onCanPlayThrough);
+                    video.addEventListener('error', onError);
+                    const timeoutId = setTimeout(onTimeout, timeoutDuration);
+
+                    // Cleanup function
+                    const cleanup = () => {
+                        clearTimeout(timeoutId);
+                        video.removeEventListener('canplay', onCanPlayThrough);
+                        video.removeEventListener('error', onError);
+                    };
+
+                    // Ensure cleanup happens
+                    Promise.race([
+                        new Promise(res => {
+                            const handler = () => {
+                                cleanup();
+                                res();
+                            };
+                            video.addEventListener('canplay', handler, { once: true });
+                        }),
+                        new Promise((_, rej) => setTimeout(() => {
+                            cleanup();
+                            rej(new Error('timeout'));
+                        }, timeoutDuration))
+                    ]).catch(() => {});
                 });
 
-                video.addEventListener('error', (e) => {
-                    reject(new Error(`Failed to load: ${file.name}`));
-                });
+                // Preload first frame for immediate display
+                video.currentTime = 0.1;
+                video.play();
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
 
-                setTimeout(() => reject(new Error(`Timeout loading: ${file.name}`)), 15000);
-            });
+            setClips(prevClips => [...prevClips, ...newClips]);
+            setLoadingProgress({ current: files.length, total: files.length });
+        } catch (error) {
+            console.error('Error loading videos:', error);
+            alert(error.message);
+        } finally {
+            setIsLoadingVideos(false);
         }
-
-        setClips(prevClips => [...prevClips, ...newClips]);
     }, []);
 
     const removeClip = useCallback((clipId) => {
@@ -103,6 +155,10 @@ function App() {
             const clip = prevClips.find(c => c.id === clipId);
             if (clip) {
                 URL.revokeObjectURL(clip.objectUrl);
+                // Remove from DOM if attached
+                if (clip.video.parentNode) {
+                    clip.video.parentNode.removeChild(clip.video);
+                }
                 clip.video.remove();
             }
             return prevClips.filter(c => c.id !== clipId);
@@ -184,52 +240,111 @@ function App() {
     const getCurrentState = useCallback((time) => {
         if (clips.length === 0) return null;
 
+        // Calculate cumulative clip start times (no overlaps now!)
         let clipStartTime = 0;
 
-        // Handle start transition (overlaps with first clip start)
+        // Handle start transition (centered at clip boundary = time 0)
         const startTransition = transitions.find(t => t.position === 'start');
         if (startTransition) {
-            const transitionDuration = Math.min(startTransition.duration, clips[0].duration);
-            if (time < transitionDuration) {
-                const progress = time / transitionDuration;
+            const d = Math.min(startTransition.duration, clips[0].duration);
+            const transitionStart = 0; // Starts at beginning
+            const transitionEnd = d; // Ends at d
+            
+            if (time >= transitionStart && time < transitionEnd) {
+                const progress = time / d;
                 return {
                     mode: 'transition',
                     transition: startTransition,
                     clip1: null,
                     clip2: clips[0],
                     progress: progress,
-                    clip2Time: time
+                    clip2Time: time // Clip2 plays through transition
                 };
             }
         }
 
+        // Iterate through clips
         for (let i = 0; i < clips.length; i++) {
             const clip = clips[i];
             const clipEndTime = clipStartTime + clip.duration;
 
-            // Check for transition to next clip
+            // Check for between transition (centered at clip boundary)
             if (i < clips.length - 1) {
                 const transition = transitions.find(t =>
                     t.position === 'between' && t.afterClipIndex === i
                 );
 
                 if (transition) {
-                    const overlap = Math.min(transition.duration, clip.duration, clips[i + 1].duration);
-                    const transitionStartTime = clipEndTime - overlap;
+                    const d = Math.min(transition.duration, clip.duration, clips[i + 1].duration);
+                    const boundary = clipEndTime; // The exact boundary between clips
+                    const transitionStart = boundary - d / 2;
+                    const transitionEnd = boundary + d / 2;
 
                     // Are we in the transition zone?
-                    if (time >= transitionStartTime && time < clipEndTime) {
-                        const transitionTime = time - transitionStartTime;
-                        const progress = transitionTime / overlap;
+                    if (time >= transitionStart && time < transitionEnd) {
+                        const transitionTime = time - transitionStart; // 0 to d
+                        const progress = transitionTime / d;
 
+                        // First half: clip1 plays its last d/2 seconds, clip2 shows first frame
+                        // Second half: clip1 shows last frame, clip2 plays its first d/2 seconds
+                        if (time < boundary) {
+                            // First half of transition
+                            return {
+                                mode: 'transition',
+                                transition: transition,
+                                clip1: clip,
+                                clip2: clips[i + 1],
+                                progress: progress,
+                                clip1Time: clip.duration - d / 2 + transitionTime, // Plays from (duration - d/2) to duration
+                                clip2Time: 0 // Shows first frame
+                            };
+                        } else {
+                            // Second half of transition
+                            return {
+                                mode: 'transition',
+                                transition: transition,
+                                clip1: clip,
+                                clip2: clips[i + 1],
+                                progress: progress,
+                                clip1Time: clip.duration, // Shows last frame
+                                clip2Time: transitionTime - d / 2 // Plays from 0 to d/2
+                            };
+                        }
+                    }
+                }
+            }
+
+            // Check for end transition (centered at end boundary)
+            const endTransition = transitions.find(t => t.position === 'end');
+            if (i === clips.length - 1 && endTransition) {
+                const d = Math.min(endTransition.duration, clip.duration);
+                const boundary = clipEndTime;
+                const transitionStart = boundary - d / 2;
+                const transitionEnd = boundary + d / 2;
+
+                if (time >= transitionStart && time < transitionEnd) {
+                    const transitionTime = time - transitionStart;
+                    const progress = transitionTime / d;
+
+                    if (time < boundary) {
+                        // Clip1 plays its last d/2 seconds
                         return {
                             mode: 'transition',
-                            transition: transition,
+                            transition: endTransition,
                             clip1: clip,
-                            clip2: clips[i + 1],
+                            clip2: null,
                             progress: progress,
-                            clip1Time: clip.duration - overlap + transitionTime,
-                            clip2Time: transitionTime
+                            clip1Time: clip.duration - d / 2 + transitionTime
+                        };
+                    } else {
+                        // Clip1 shows last frame
+                        return {
+                            mode: 'transition',
+                            transition: endTransition,
+                            clip1: clip,
+                            clip2: null,
+                            progress: progress,
+                            clip1Time: clip.duration,
                         };
                     }
                 }
@@ -238,28 +353,6 @@ function App() {
             // Regular clip playback (not in transition)
             if (time >= clipStartTime && time < clipEndTime) {
                 const clipTime = time - clipStartTime;
-
-                // Check if we're in end transition zone
-                const endTransition = transitions.find(t => t.position === 'end');
-                if (i === clips.length - 1 && endTransition) {
-                    const overlap = Math.min(endTransition.duration, clip.duration);
-                    const transitionStartTime = clipEndTime - overlap;
-
-                    if (time >= transitionStartTime) {
-                        const transitionTime = time - transitionStartTime;
-                        const progress = transitionTime / overlap;
-
-                        return {
-                            mode: 'transition',
-                            transition: endTransition,
-                            clip1: clip,
-                            clip2: null,
-                            progress: progress,
-                            clip1Time: clip.duration - overlap + transitionTime
-                        };
-                    }
-                }
-
                 return {
                     mode: 'clip',
                     clip: clip,
@@ -267,16 +360,8 @@ function App() {
                 };
             }
 
-            // Move to next clip (subtract overlap if there's a transition)
-            const nextTransition = transitions.find(t =>
-                t.position === 'between' && t.afterClipIndex === i
-            );
-            if (nextTransition) {
-                const overlap = Math.min(nextTransition.duration, clip.duration, clips[i + 1]?.duration || 0);
-                clipStartTime = clipEndTime - overlap;
-            } else {
-                clipStartTime = clipEndTime;
-            }
+            // Move to next clip (no overlap subtraction!)
+            clipStartTime = clipEndTime;
         }
 
         // Fallback: show last clip at end
@@ -292,8 +377,14 @@ function App() {
     }, []);
 
     const seekTo = useCallback((time) => {
+        setIsPlaying(false);
         setCurrentTime(Math.min(Math.max(0, time), totalDuration));
-    }, [totalDuration]);
+        if(isPlaying) {
+            setTimeout(() => {
+                setIsPlaying(true);
+            }, 1);
+        }
+    }, [totalDuration, isPlaying]);
 
     return (
         <div className="app">
@@ -316,6 +407,8 @@ function App() {
                                 animationFrameRef={animationFrameRef}
                                 fps={fps}
                                 setFps={setFps}
+                                isLoadingVideos={isLoadingVideos}
+                                loadingProgress={loadingProgress}
                             />
 
                             <PlaybackControls
@@ -324,6 +417,7 @@ function App() {
                                 totalDuration={totalDuration}
                                 onTogglePlayback={togglePlayback}
                                 onSeek={seekTo}
+                                disabled={isLoadingVideos}
                             />
 
                             <Timeline
@@ -352,14 +446,7 @@ function App() {
                                 }}
                             />
 
-                            {isExporting && (
-                                <div className="progress-container">
-                                    <div className="progress-bar">
-                                        <div className="progress-fill" style={{ width: `${exportProgress}%` }}></div>
-                                        <div className="progress-text">Exporting: {Math.round(exportProgress)}%</div>
-                                    </div>
-                                </div>
-                            )}
+                            
                         </>
                     )}
                 </div>
@@ -380,6 +467,8 @@ function App() {
                         onDurationChange={setTransitionDuration}
                         onPositionChange={setTransitionPosition}
                         onApplyTransition={applyTransition}
+                        clips={clips}
+                        transitions={transitions}
                         onExport={(exportFn) => {
                             setIsExporting(true);
                             setExportProgress(0);
@@ -388,7 +477,9 @@ function App() {
                                 transitions,
                                 totalDuration,
                                 getCurrentState,
-                                (progress) => setExportProgress(progress),
+                                (progress) => {
+                                    setExportProgress(progress);
+                                },
                                 () => {
                                     setIsExporting(false);
                                     setExportProgress(0);
@@ -396,7 +487,6 @@ function App() {
                             );
                         }}
                         disabled={clips.length === 0}
-                        clips={clips}
                     />
                 </div>
             </div>
